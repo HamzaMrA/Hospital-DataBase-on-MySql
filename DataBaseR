@@ -1,0 +1,566 @@
+
+
+
+CREATE DATABASE RumeliCareHamza_dbHZ;
+USE RumeliCareHamza_dbHZ;
+
+
+
+CREATE TABLE Hastalar (
+    HastaID INT AUTO_INCREMENT PRIMARY KEY,
+    TCNo CHAR(11) NOT NULL UNIQUE,
+    Ad VARCHAR(50),
+    Soyad VARCHAR(50),
+    DogumTarihi DATE,
+    Cinsiyet ENUM('K','E'),
+    Telefon VARCHAR(20),
+    Adres TEXT,
+    KanGrubu VARCHAR(5),
+    Alerjiler TEXT,
+    KayitTarihi DATETIME DEFAULT CURRENT_TIMESTAMP,
+    SonZiyaretTarihi DATETIME
+);
+
+CREATE TABLE Bolumler (
+    BolumID INT AUTO_INCREMENT PRIMARY KEY,
+    BolumAdi VARCHAR(50),
+    Kat INT,
+    CalismaSaatleri VARCHAR(20)
+);
+
+CREATE TABLE Doktorlar (
+    DoktorID INT AUTO_INCREMENT PRIMARY KEY,
+    SicilNo VARCHAR(20) UNIQUE,
+    AdSoyad VARCHAR(100),
+    Uzmanlik VARCHAR(50),
+    Telefon VARCHAR(20),
+    BolumID INT,
+    MuayeneUcreti DECIMAL(10,2),
+    FOREIGN KEY (BolumID) REFERENCES Bolumler(BolumID)
+);
+
+CREATE TABLE Randevular (
+    RandevuID INT AUTO_INCREMENT PRIMARY KEY,
+    HastaID INT,
+    DoktorID INT,
+    Tarih DATE,
+    Saat TIME,
+    Durum ENUM('Bekliyor','Tamamlandı','İptal') DEFAULT 'Bekliyor',
+    OlusturmaTarihi DATETIME DEFAULT CURRENT_TIMESTAMP,
+    IptalTarihi DATETIME,
+    FOREIGN KEY (HastaID) REFERENCES Hastalar(HastaID),
+    FOREIGN KEY (DoktorID) REFERENCES Doktorlar(DoktorID),
+    UNIQUE (DoktorID, Tarih, Saat)
+);
+
+CREATE TABLE Muayeneler (
+    MuayeneID INT AUTO_INCREMENT PRIMARY KEY,
+    RandevuID INT,
+    Sikayet TEXT,
+    Teshis TEXT,
+    TedaviNotu TEXT,
+    MuayeneTarihi DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (RandevuID) REFERENCES Randevular(RandevuID)
+);
+
+CREATE TABLE Ilaclar (
+    IlacID INT AUTO_INCREMENT PRIMARY KEY,
+    IlacAdi VARCHAR(100),
+    EtkenMadde VARCHAR(100),
+    Fiyat DECIMAL(10,2)
+);
+
+CREATE TABLE Receteler (
+    ReceteID INT AUTO_INCREMENT PRIMARY KEY,
+    MuayeneID INT,
+    Tarih DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (MuayeneID) REFERENCES Muayeneler(MuayeneID)
+);
+
+CREATE TABLE ReceteDetay (
+    ReceteDetayID INT AUTO_INCREMENT PRIMARY KEY,
+    ReceteID INT,
+    IlacID INT,
+    Dozaj VARCHAR(50),
+    Talimat VARCHAR(100),
+    FOREIGN KEY (ReceteID) REFERENCES Receteler(ReceteID),
+    FOREIGN KEY (IlacID) REFERENCES Ilaclar(IlacID)
+);
+
+CREATE TABLE Faturalar (
+    FaturaID INT AUTO_INCREMENT PRIMARY KEY,
+    MuayeneID INT,
+    Tutar DECIMAL(10,2),
+    OdemeDurumu ENUM('Ödendi','Bekliyor'),
+    OdemeTarihi DATETIME,
+    OdemeYontemi ENUM('Nakit','Kredi Kartı','Havale'),
+    FOREIGN KEY (MuayeneID) REFERENCES Muayeneler(MuayeneID)
+);
+
+CREATE TABLE IslemLoglari (
+    LogID INT AUTO_INCREMENT PRIMARY KEY,
+    Islem VARCHAR(100),
+    Detay TEXT,
+    Tarih DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+/* 
+   INDEXLER
+   */
+
+CREATE INDEX idx_Hastalar_TCNo ON Hastalar(TCNo);
+CREATE INDEX idx_Randevular_Tarih ON Randevular(Tarih);
+CREATE INDEX idx_Randevular_DoktorID ON Randevular(DoktorID);
+
+/* 
+   PROCEDURE'LAR
+    */
+   
+
+DELIMITER //
+CREATE PROCEDURE sp_RandevuOlustur(
+    IN pHastaID INT,
+    IN pDoktorID INT,
+    IN pTarih DATE,
+    IN pSaat TIME
+)
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM Randevular
+        WHERE DoktorID=pDoktorID AND Tarih=pTarih AND Saat=pSaat
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT='Doktor bu saatte dolu';
+    END IF;
+
+    INSERT INTO Randevular(HastaID,DoktorID,Tarih,Saat)
+    VALUES(pHastaID,pDoktorID,pTarih,pSaat);
+END //
+DELIMITER ;
+
+-- 2. Muayene Tamamla
+DELIMITER //
+CREATE PROCEDURE sp_MuayeneTamamla(
+    IN pRandevuID INT,
+    IN pSikayet TEXT,
+    IN pTeshis TEXT,
+    IN pTedavi TEXT
+)
+BEGIN
+    INSERT INTO Muayeneler(RandevuID,Sikayet,Teshis,TedaviNotu)
+    VALUES(pRandevuID,pSikayet,pTeshis,pTedavi);
+
+    UPDATE Randevular SET Durum='Tamamlandı'
+    WHERE RandevuID=pRandevuID;
+END //
+DELIMITER ;
+
+-- 3. Reçete Oluştur
+DELIMITER //
+CREATE PROCEDURE sp_ReceteOlustur(
+    IN pMuayeneID INT,
+    IN pIlacID INT,
+    IN pDozaj VARCHAR(50),
+    IN pTalimat VARCHAR(100)
+)
+BEGIN
+    DECLARE alerji TEXT;
+    DECLARE etken VARCHAR(100);
+    DECLARE rid INT;
+
+    SELECT H.Alerjiler INTO alerji
+    FROM Hastalar H
+    JOIN Randevular R ON H.HastaID=R.HastaID
+    JOIN Muayeneler M ON R.RandevuID=M.RandevuID
+    WHERE M.MuayeneID=pMuayeneID;
+
+    SELECT EtkenMadde INTO etken FROM Ilaclar WHERE IlacID=pIlacID;
+
+    IF alerji IS NOT NULL AND alerji LIKE CONCAT('%',etken,'%') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT='Alerji uyarısı';
+    END IF;
+
+    SELECT ReceteID INTO rid FROM Receteler WHERE MuayeneID=pMuayeneID LIMIT 1;
+
+    IF rid IS NULL THEN
+        INSERT INTO Receteler(MuayeneID) VALUES(pMuayeneID);
+        SET rid = LAST_INSERT_ID();
+    END IF;
+
+    INSERT INTO ReceteDetay (ReceteID, IlacID, Dozaj, Talimat) 
+    VALUES(rid, pIlacID, pDozaj, pTalimat);
+END //
+DELIMITER ;
+
+DELIMITER //
+CREATE PROCEDURE sp_HastaGecmisi(IN pHastaID INT)
+BEGIN
+    SELECT H.Ad, H.Soyad, R.Tarih, M.Teshis, M.TedaviNotu, I.IlacAdi
+    FROM Hastalar H
+    JOIN Randevular R ON H.HastaID = R.HastaID
+    LEFT JOIN Muayeneler M ON R.RandevuID = M.RandevuID
+    LEFT JOIN Receteler RE ON M.MuayeneID = RE.MuayeneID
+    LEFT JOIN ReceteDetay RD ON RE.ReceteID = RD.ReceteID
+    LEFT JOIN Ilaclar I ON RD.IlacID = I.IlacID
+    WHERE H.HastaID = pHastaID
+    ORDER BY R.Tarih DESC;
+END //
+
+DELIMITER ;
+
+DELIMITER //
+
+CREATE PROCEDURE sp_GunlukRapor(IN pTarih DATE)
+BEGIN
+    SELECT 
+        COUNT(*) AS ToplamRandevu,
+        SUM(CASE WHEN Durum = 'Tamamlandı' THEN 1 ELSE 0 END) AS Tamamlanan,
+        SUM(CASE WHEN Durum = 'İptal' THEN 1 ELSE 0 END) AS Iptal,
+        (SELECT SUM(Tutar) FROM Faturalar F 
+         JOIN Muayeneler M ON F.MuayeneID = M.MuayeneID
+         JOIN Randevular R2 ON M.RandevuID = R2.RandevuID
+         WHERE R2.Tarih = pTarih) AS ToplamGelir
+    FROM Randevular
+    WHERE Tarih = pTarih;
+END //
+DELIMITER ;
+
+/* =======================
+   TRIGGER'LAR
+   ======================= */
+
+
+
+-- 1. Randevu Çakışma Kontrolü (BEFORE INSERT)
+DELIMITER //
+
+CREATE TRIGGER trg_RandevuCakismaKontrol
+BEFORE INSERT ON Randevular
+FOR EACH ROW
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM Randevular
+        WHERE DoktorID = NEW.DoktorID
+          AND Tarih = NEW.Tarih
+          AND Saat = NEW.Saat
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Hata: Seçilen doktor bu tarih ve saatte dolu!';
+    END IF;
+END //
+DELIMITER ;
+
+-- 2. Otomatik Fatura Oluşturma (AFTER INSERT)
+DELIMITER //
+
+CREATE TRIGGER trg_OtomatikFatura
+AFTER INSERT ON Muayeneler
+FOR EACH ROW
+BEGIN
+    INSERT INTO Faturalar(MuayeneID, Tutar, OdemeDurumu)
+    SELECT NEW.MuayeneID, D.MuayeneUcreti, 'Bekliyor'
+    FROM Randevular R
+    JOIN Doktorlar D ON R.DoktorID = D.DoktorID
+    WHERE R.RandevuID = NEW.RandevuID;
+END //
+DELIMITER ;
+
+-- 3. Randevu İptal Loglama (AFTER UPDATE)
+DELIMITER //
+
+CREATE TRIGGER trg_RandevuIptalLog
+AFTER UPDATE ON Randevular
+FOR EACH ROW
+BEGIN
+    -- Sadece durum 'İptal'e çekildiğinde log tutar
+    IF NEW.Durum = 'İptal' AND OLD.Durum != 'İptal' THEN
+        INSERT INTO IslemLoglari(Islem, Detay)
+        VALUES('Randevu İptal', CONCAT('Randevu ID: ', NEW.RandevuID, ' nolu randevu iptal edildi.'));
+    END IF;
+END //
+DELIMITER ;
+
+-- 4. Hasta Son Ziyaret Güncelleme (AFTER INSERT)
+DELIMITER //
+
+CREATE TRIGGER trg_HastaSonZiyareti
+AFTER INSERT ON Muayeneler
+FOR EACH ROW
+BEGIN
+    UPDATE Hastalar
+    SET SonZiyaretTarihi = NOW()
+    WHERE HastaID = (
+        SELECT HastaID FROM Randevular
+        WHERE RandevuID = NEW.RandevuID
+    );
+END //
+DELIMITER ;
+/* =======================
+   VIEW'LAR
+   ======================= */
+   
+   
+   
+   
+CREATE OR REPLACE VIEW vw_BugununRandevulari AS
+SELECT 
+    R.Saat, 
+    CONCAT(H.Ad, ' ', H.Soyad) AS HastaAdi, 
+    D.AdSoyad AS DoktorAdi, 
+    B.BolumAdi, 
+    R.Durum
+FROM Randevular R
+JOIN Hastalar H ON R.HastaID = H.HastaID
+JOIN Doktorlar D ON R.DoktorID = D.DoktorID
+JOIN Bolumler B ON D.BolumID = B.BolumID
+WHERE R.Tarih = CURDATE();
+
+CREATE OR REPLACE VIEW vw_DoktorMusaitlik AS
+SELECT 
+    D.AdSoyad,
+    COUNT(R.RandevuID) AS ToplamRandevu,
+    SUM(CASE WHEN R.Durum = 'Bekliyor' THEN 1 ELSE 0 END) AS BekleyenSeans,
+    SUM(CASE WHEN R.Durum = 'Tamamlandı' THEN 1 ELSE 0 END) AS DoluSeans
+FROM Doktorlar D
+LEFT JOIN Randevular R ON D.DoktorID = R.DoktorID AND R.Tarih = CURDATE()
+GROUP BY D.DoktorID;
+
+CREATE OR REPLACE VIEW vw_HastaMuayeneOzeti AS
+SELECT 
+    CONCAT(H.Ad, ' ', H.Soyad) AS Hasta,
+    COUNT(M.MuayeneID) AS ToplamMuayene,
+    MAX(M.MuayeneTarihi) AS SonMuayene,
+    (SELECT B.BolumAdi 
+     FROM Muayeneler M2 
+     JOIN Randevular R2 ON M2.RandevuID = R2.RandevuID 
+     JOIN Doktorlar D2 ON R2.DoktorID = D2.DoktorID 
+     JOIN Bolumler B ON D2.BolumID = B.BolumID 
+     WHERE R2.HastaID = H.HastaID 
+     GROUP BY B.BolumID ORDER BY COUNT(*) DESC LIMIT 1) AS EnSikGittigiBolum
+FROM Hastalar H
+LEFT JOIN Randevular R ON H.HastaID = R.HastaID
+LEFT JOIN Muayeneler M ON R.RandevuID = M.RandevuID
+GROUP BY H.HastaID;
+
+CREATE OR REPLACE VIEW vw_AylikGelir AS
+SELECT 
+    B.BolumAdi,
+    D.AdSoyad AS Doktor,
+    MONTHNAME(F.OdemeTarihi) AS Ay,
+    SUM(F.Tutar) AS ToplamKazanc
+FROM Faturalar F
+JOIN Muayeneler M ON F.MuayeneID = M.MuayeneID
+JOIN Randevular R ON M.RandevuID = R.RandevuID
+JOIN Doktorlar D ON R.DoktorID = D.DoktorID
+JOIN Bolumler B ON D.BolumID = B.BolumID
+WHERE F.OdemeDurumu = 'Ödendi'
+GROUP BY B.BolumID, D.DoktorID, Ay;
+
+CREATE OR REPLACE VIEW vw_OdenmemiSFaturalar AS
+SELECT 
+    CONCAT(H.Ad, ' ', H.Soyad) AS HastaAdi,
+    F.Tutar,
+    M.MuayeneTarihi,
+    D.AdSoyad AS Doktor
+FROM Faturalar F
+JOIN Muayeneler M ON F.MuayeneID = M.MuayeneID
+JOIN Randevular R ON M.RandevuID = R.RandevuID
+JOIN Hastalar H ON R.HastaID = H.HastaID
+JOIN Doktorlar D ON R.DoktorID = D.DoktorID
+WHERE F.OdemeDurumu = 'Bekliyor';
+
+
+
+
+/* =======================
+   VERİLER 
+   ======================= */
+
+INSERT INTO Bolumler (BolumAdi, Kat, CalismaSaatleri) VALUES
+('Kardiyoloji', 2, '09-17'),
+('Dahiliye', 1, '09-17'),
+('Nöroloji', 3, '09-17'),
+('Ortopedi', 2, '09-17'),
+('Göz Hastalıkları', 1, '09-17'),
+('Kulak Burun Boğaz', 1, '09-17');
+
+INSERT INTO Doktorlar (SicilNo, AdSoyad, Uzmanlik, Telefon, BolumID, MuayeneUcreti) VALUES
+('DR01', 'Mehmet Demir', 'Kardiyoloji', '500', 1, 800),
+('DR02', 'Zeynep Kara', 'Dahiliye', '501', 2, 700),
+('DR03', 'Ahmet Yıldız', 'Nöroloji', '502', 3, 750),
+('DR04', 'Elif Aydın', 'Ortopedi', '503', 4, 650),
+('DR05', 'Murat Can', 'Göz', '504', 5, 600),
+('DR06', 'Ayşe Polat', 'KBB', '505', 6, 600),
+('DR07', 'Kemal Şen', 'Kardiyoloji', '506', 1, 820),
+('DR08', 'Seda Ak', 'Dahiliye', '507', 2, 710),
+('DR09', 'Burak Arslan', 'Nöroloji', '508', 3, 760),
+('DR10', 'Deniz Koç', 'Ortopedi', '509', 4, 670);
+
+
+INSERT INTO Hastalar (TCNo, Ad, Soyad, DogumTarihi, Cinsiyet, Telefon, Adres, KanGrubu, Alerjiler) VALUES
+('12345678901','Ayşe','Yılmaz','1990-01-01','K','500','İstanbul','A+',''),
+('12345678902','Ali','Kaya','1985-05-05','E','501','İstanbul','0+','Penisilin'),
+('12345678903','Mehmet','Can','1992-03-03','E','502','Ankara','B+',''),
+('12345678904','Elif','Demir','1995-06-06','K','503','İzmir','A-',''),
+('12345678905','Ahmet','Yıldız','1980-02-02','E','504','Bursa','0-',''),
+('12345678906','Zeynep','Aydın','1991-09-09','K','505','Antalya','B-',''),
+('12345678907','Burak','Arslan','1988-04-04','E','506','Adana','A+',''),
+('12345678908','Seda','Ak','1993-07-07','K','507','Konya','AB+',''),
+('12345678909','Kemal','Şen','1984-11-11','E','508','Trabzon','0+',''),
+('12345678910','Deniz','Koç','1996-12-12','K','509','Mersin','A-',''),
+('12345678911','Can','Polat','1990-05-15','E','510','İstanbul','B+',''),
+('12345678912','Ece','Yılmaz','1998-08-18','K','511','İstanbul','0+',''),
+('12345678913','Onur','Kurt','1987-10-20','E','512','Samsun','A+',''),
+('12345678914','Gizem','Çelik','1994-01-25','K','513','Eskişehir','B-',''),
+('12345678915','Serkan','Taş','1983-03-30','E','514','Kocaeli','AB+',''),
+('12345678916','Buse','Öztürk','1999-09-09','K','515','Tekirdağ','0-',''),
+('12345678917','Emre','Şahin','1986-12-01','E','516','Balıkesir','A+',''),
+('12345678918','Aslı','Er','1992-07-21','K','517','Aydın','B+',''),
+('12345678919','Tolga','Yavuz','1989-02-14','E','518','Muğla','0+',''),
+('12345678920','Melis','Doğan','1997-06-06','K','519','İzmir','A+','');
+
+INSERT INTO Ilaclar (IlacAdi, EtkenMadde, Fiyat) VALUES
+('Beloc','Metoprolol',50), ('Coraspin','Asetilsalisilik Asit',40), ('Norvasc','Amlodipin',55),
+('Concor','Bisoprolol',48), ('Dideral','Propranolol',45), ('Tansifar','Losartan',60),
+('Aspirin','Asetilsalisilik Asit',30), ('Minoset','Parasetamol',20), ('Parol','Parasetamol',18),
+('Arveles','Deksketoprofen',35), ('Majezik','Flurbiprofen',38), ('Augmentin','Amoksisilin',75),
+('Amoksisilin','Penisilin',65), ('Klavunat','Amoksisilin',70), ('Zitromax','Azitromisin',85),
+('Cipro','Siprofloksasin',90), ('Flagyl','Metronidazol',45), ('Biteral','Ornidazol',50),
+('Voltaren','Diklofenak',42), ('Apranax','Naproksen',40), ('Glifor','Metformin',55),
+('Diaformin','Metformin',52), ('Nidazol','Metronidazol',48), ('Rennie','Kalsiyum Karbonat',25),
+('Gaviscon','Aljinik Asit',30), ('Xanax','Alprazolam',60), ('Nexium','Esomeprazol',70),
+('Lansor','Lansoprazol',68), ('Pulcet','Pantoprazol',72), ('Controloc','Pantoprazol',74);
+
+INSERT INTO Randevular (HastaID, DoktorID, Tarih, Saat, Durum) VALUES
+(1,1,CURDATE(),'09:00','Tamamlandı'),
+(2,1,CURDATE(),'10:00','Tamamlandı'),
+(3,2,'2024-11-02','09:00','Tamamlandı'),
+(4,2,'2024-11-02','10:00','İptal'),
+(5,3,'2024-11-03','11:00','Tamamlandı'),
+(6,3,'2024-11-03','12:00','Bekliyor'),
+(7,4,'2024-11-04','09:00','Tamamlandı'),
+(8,4,'2024-11-04','10:00','Tamamlandı'),
+(9,5,'2024-11-05','11:00','İptal'),
+(10,5,'2024-11-05','12:00','Tamamlandı'),
+(11,6,'2024-11-06','09:00','Tamamlandı'),
+(12,6,'2024-11-06','10:00','Bekliyor'),
+(13,7,'2024-11-07','11:00','Tamamlandı'),
+(14,7,'2024-11-07','12:00','Tamamlandı'),
+(15,8,'2024-11-08','09:00','Tamamlandı'),
+(16,8,'2024-11-08','10:00','Bekliyor'),
+(17,9,'2024-11-09','11:00','Tamamlandı'),
+(18,9,'2024-11-09','12:00','İptal'),
+(19,10,'2024-11-10','09:00','Tamamlandı'),
+(20,10,'2024-11-10','10:00','Tamamlandı'),
+(1,2,'2024-11-11','11:00','Tamamlandı'),
+(2,3,'2024-11-11','12:00','Bekliyor'),
+(3,4,'2024-11-12','09:00','Tamamlandı'),
+(4,5,'2024-11-12','10:00','Tamamlandı'),
+(5,6,'2024-11-13','11:00','İptal'),
+(6,7,'2024-11-13','12:00','Tamamlandı'),
+(7,8,'2024-11-14','09:00','Tamamlandı'),
+(8,9,'2024-11-14','10:00','Bekliyor'),
+(9,10,'2024-11-15','11:00','Tamamlandı'),
+(10,1,'2024-11-15','12:00','Tamamlandı'),
+(11,2,'2024-11-16','09:00','Tamamlandı'),
+(12,3,'2024-11-16','10:00','Bekliyor'),
+(13,4,'2024-11-17','11:00','Tamamlandı'),
+(14,5,'2024-11-17','12:00','Tamamlandı'),
+(15,6,'2024-11-18','09:00','İptal'),
+(16,7,'2024-11-18','10:00','Tamamlandı'),
+(17,8,'2024-11-19','11:00','Tamamlandı'),
+(18,9,'2024-11-19','12:00','Bekliyor'),
+(19,10,'2024-11-20','09:00','Tamamlandı'),
+(20,1,'2024-11-20','10:00','Tamamlandı'),
+(1,3,'2024-11-21','11:00','Bekliyor'),
+(2,4,'2024-11-21','12:00','Tamamlandı'),
+(3,5,'2024-11-22','09:00','Tamamlandı'),
+(4,6,'2024-11-22','10:00','İptal'),
+(5,7,'2024-11-23','11:00','Tamamlandı'),
+(6,8,'2024-11-23','12:00','Tamamlandı');
+
+INSERT INTO Muayeneler (RandevuID, Sikayet, Teshis, TedaviNotu) VALUES
+(2, 'Göğüs ağrısı', 'Stabil Angina', 'İlaç tedavisi'),
+(3, 'Mide bulantısı', 'Gastrit', 'Diyet programı'),
+(5, 'Baş dönmesi', 'Vertigo', 'Egzersiz'),
+(7, 'Diz ağrısı', 'Menisküs', 'Fizik tedavi'),
+(8, 'Eklem ağrısı', 'Romatizma', 'Ağrı kesici'),
+(10, 'Göz kuruluğu', 'Konjonktivit', 'Göz damlası'),
+(11, 'Boğaz ağrısı', 'Farenjit', 'Antibiyotik'),
+(13, 'Çarpıntı', 'Aritmi', 'Kardiyak takip'),
+(14, 'Nefes darlığı', 'KOAH başlangıcı', 'Fısfıs ve takip'),
+(15, 'Halsizlik', 'Vitamin eksikliği', 'Takviye edici gıda'),
+(17, 'Unutkanlık', 'B12 eksikliği', 'İğne tedavisi'),
+(19, 'Bel ağrısı', 'Bel fıtığı', 'İstirahat'),
+(20, 'Boyun ağrısı', 'Boyun düzleşmesi', 'Boyunluk'),
+(21, 'Karın ağrısı', 'Spastik kolon', 'Diyet'),
+(23, 'Sırt ağrısı', 'Duruş bozukluğu', 'Pilates önerisi'),
+(24, 'Bulanık görme', 'Miyopi', 'Gözlük'),
+(26, 'Kulak çınlaması', 'Tinnitus', 'İlaç tedavisi'),
+(27, 'Tansiyon', 'Hipertansiyon', 'Tuzsuz diyet'),
+(29, 'Ayak bileği burkulması', 'Bağ zedelenmesi', 'Atel'),
+(30, 'Göğüs sıkışması', 'Panik atak', 'Psikiyatri sevki'),
+(31, 'Öksürük', 'Bronşit', 'Şurup'),
+(33, 'Eklem kilitlenmesi', 'Kireçlenme', 'Krem tedavisi'),
+(34, 'Işığa duyarlılık', 'Migren', 'Karanlık oda istirahatı'),
+(36, 'Duymada azalma', 'Kulak kiri', 'Kulak yıkama'),
+(37, 'Çabuk yorulma', 'Anemi', 'Demir ilacı'),
+(39, 'Omuz ağrısı', 'Lif yırtılması', 'Ameliyat önerisi'),
+(40, 'Hırıltılı nefes', 'Alerjik astım', 'Hava takviyesi'),
+(42, 'Denge kaybı', 'Orta kulak iltihabı', 'Antibiyotik damla'),
+(43, 'Gözde yanma', 'Alerji', 'Antihistaminik'),
+(45, 'Ayak ağrısı', 'Topuk dikeni', 'Silikon tabanlık'),
+(46, 'Mide yanması', 'Reflü', 'Antiasit şurup'),
+(1, 'Öksürük', 'Grip', 'İstirahat'), -- Mevcut olanı 40'a tamamlamak için eklemeler
+(2, 'Halsizlik', 'Enfeksiyon', 'Sıvı takviyesi'),
+(3, 'Baş ağrısı', 'Sinüzit', 'Buğu tedavisi'),
+(5, 'Sırt ağrısı', 'Kas spazmı', 'Gevşetici'),
+(7, 'Diz şişmesi', 'Ödem', 'Buz uygulaması'),
+(8, 'Yorgunluk', 'Uykusuzluk', 'Düzenli uyku'),
+(10, 'Kaşıntı', 'Dermatit', 'Losyon'),
+(11, 'Ateş', 'Viral enfeksiyon', 'Ateş düşürücü');
+
+INSERT INTO Receteler (MuayeneID) VALUES
+(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),
+(11),(12),(13),(14),(15),(16),(17),(18),(19),(20),
+(21),(22),(23),(24),(25),(26),(27),(28),(29),(30);
+
+INSERT INTO ReceteDetay (ReceteID, IlacID, Dozaj, Talimat) VALUES
+(1, 1, '1x1', 'Aç karnına'), (1, 2, '2x1', 'Tok karnına'),
+(2, 3, '1x1', 'Gece yatmadan'), (2, 8, '1x1', 'Tok karnına'),
+(3, 24, '3x1', 'Yemekten sonra'), (3, 25, '2x1', 'Yemekten önce'),
+(4, 9, '1x1', 'Günde 1 kez'), (5, 10, '2x1', '12 saat arayla'),
+(6, 12, '1x1', 'Tok'), (6, 13, '2x1', 'Tok'),
+(7, 19, '1x1', 'Haricen sürülür'), (8, 20, '1x1', 'Ağrı olduğunda'),
+(10, 5, '1x1', 'Tok'), (11, 12, '2x1', 'Tok'),
+(15, 9, '1x1', 'Tok'), (15, 10, '1x1', 'Tok'),
+(20, 29, '1x1', 'Akşamları'), (25, 15, '2x1', 'Tok');
+
+
+-- Senaryo: 5 nolu hastaya, 1 nolu doktora, yarın için saat 10:00'a randevu al.
+CALL sp_RandevuOlustur(5, 1, DATE_ADD(CURDATE(), INTERVAL 1 DAY), '10:00');
+
+-- Kontrol:
+SELECT * FROM Randevular WHERE HastaID = 5;
+
+CALL sp_MuayeneTamamla(1, 'Şiddetli öksürük ve halsizlik', 'Üst solunum yolu enfeksiyonu', 'Bol sıvı tüketimi ve istirahat');
+
+-- Kontrol (Fatura ve Tarih için):
+SELECT * FROM Faturalar;
+SELECT HastaID, Ad, SonZiyaretTarihi FROM Hastalar WHERE HastaID = 1;
+
+
+SELECT * FROM Muayeneler;
+
+SELECT * FROM ReceteDetay;
+
+SELECT * FROM Faturalar;
+
+      
+    
+
+
+
+
+
